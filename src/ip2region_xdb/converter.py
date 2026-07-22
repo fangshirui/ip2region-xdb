@@ -117,6 +117,9 @@ class MMDBConverter:
     # ASN 映射表 - 从 asn.txt 懒加载
     _asn_map_cache: dict[str, dict[int, str]] = {}
 
+    # 美国州名映射表 - 从 us_states.txt 加载
+    _us_state_name_map_cache: dict[str, dict[str, str]] = {}
+
     @classmethod
     def _load_asn_map(cls, data_dir: str) -> dict[int, str]:
         """从 asn.txt 加载 ASN→运营商映射（格式：ASN\\t运营商名）。"""
@@ -146,6 +149,35 @@ class MMDBConverter:
         cls._asn_map_cache[abs_dir] = asn_map
         return asn_map
 
+    @classmethod
+    def _load_us_state_name_map(cls, data_dir: str) -> dict[str, str]:
+        """加载美国州名映射（us_states.txt 格式：中文名,英文名）。"""
+        abs_dir = os.path.abspath(data_dir)
+        cached = cls._us_state_name_map_cache.get(abs_dir)
+        if cached is not None:
+            return cached
+
+        state_name_map = {}
+        state_path = os.path.join(abs_dir, "us_states.txt")
+        if os.path.exists(state_path):
+            with open(state_path, "r", encoding="utf-8-sig") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split(',', 1)
+                    if len(parts) != 2:
+                        continue
+                    chinese_name, english_name = (part.strip() for part in parts)
+                    if chinese_name and english_name:
+                        state_name_map[sys.intern(english_name)] = sys.intern(chinese_name)
+            Log.info(f"加载美国州名映射: {len(state_name_map)} 条")
+        else:
+            Log.warn(f"美国州名映射文件未找到: {state_path}")
+
+        cls._us_state_name_map_cache[abs_dir] = state_name_map
+        return state_name_map
+
     # 港澳台地区名称映射
     HMT_REGIONS = {"香港", "澳门", "台湾"}
 
@@ -168,6 +200,7 @@ class MMDBConverter:
 
         # 确保数据目录存在
         os.makedirs(data_dir, exist_ok=True)
+        self._us_state_name_map = self._load_us_state_name_map(data_dir)
 
     @lru_cache(maxsize=1024)
     def _normalize_country_name(self, country: str) -> str:
@@ -196,12 +229,21 @@ class MMDBConverter:
         # 国家 - 优先使用中文名，并处理港澳台
         country_d = data.get("country")
         country = ""
+        country_iso_code = ""
         if country_d:
+            country_iso_code = country_d.get("iso_code") or ""
             names = country_d.get("names")
             if names:
                 country = names.get("zh-CN") or names.get("en") or ""
         if country:
             country = self._normalize_country_name(country)
+
+        # 部分记录可能没有 country，但包含 registered_country。
+        # 仅在 country ISO 缺失时使用它判断是否为美国，避免覆盖实际归属国家。
+        if not country_iso_code:
+            registered_country = data.get("registered_country")
+            if registered_country:
+                country_iso_code = registered_country.get("iso_code") or ""
 
         # 省份/州 - 来自 subdivisions[0]
         province = ""
@@ -211,7 +253,14 @@ class MMDBConverter:
             sub0 = subdivisions[0]
             names = sub0.get("names") if isinstance(sub0, dict) else None
             if names:
-                province = names.get("zh-CN") or names.get("en") or ""
+                # 美国州名先取 GeoLite 英文名，再按配置映射为标准中文名。
+                if country_iso_code == "US":
+                    english_name = names.get("en") or ""
+                    province = self._us_state_name_map.get(
+                        english_name, english_name
+                    ) or names.get("zh-CN") or ""
+                else:
+                    province = names.get("zh-CN") or names.get("en") or ""
             # 区县 - 来自 subdivisions[1]（如果存在）
             if len(subdivisions) > 1:
                 sub1 = subdivisions[1]
