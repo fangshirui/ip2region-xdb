@@ -120,6 +120,9 @@ class MMDBConverter:
     # 美国州名映射表 - 从 us_states.txt 加载
     _us_state_name_map_cache: dict[str, dict[str, str]] = {}
 
+    # 国家中文名映射表 - 从 countries.txt 加载
+    _country_name_map_cache: dict[str, dict[str, str]] = {}
+
     @classmethod
     def _load_asn_map(cls, data_dir: str) -> dict[int, str]:
         """从 asn.txt 加载 ASN→运营商映射（格式：ASN\\t运营商名）。"""
@@ -178,8 +181,35 @@ class MMDBConverter:
         cls._us_state_name_map_cache[abs_dir] = state_name_map
         return state_name_map
 
-    # 港澳台地区名称映射
-    HMT_REGIONS = {"香港", "澳门", "台湾"}
+    @classmethod
+    def _load_country_name_map(cls, data_dir: str) -> dict[str, str]:
+        """加载国家中文名映射（countries.txt 格式：ISO代码,中文名）。"""
+        abs_dir = os.path.abspath(data_dir)
+        cached = cls._country_name_map_cache.get(abs_dir)
+        if cached is not None:
+            return cached
+
+        country_name_map = {}
+        country_path = os.path.join(abs_dir, "countries.txt")
+        if os.path.exists(country_path):
+            with open(country_path, "r", encoding="utf-8-sig") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split(',', 1)
+                    if len(parts) != 2:
+                        continue
+                    iso_code, chinese_name = (part.strip() for part in parts)
+                    iso_code = iso_code.upper()
+                    if iso_code and chinese_name:
+                        country_name_map[sys.intern(iso_code)] = sys.intern(chinese_name)
+            Log.info(f"加载国家中文名映射: {len(country_name_map)} 条")
+        else:
+            Log.warn(f"国家中文名映射文件未找到: {country_path}")
+
+        cls._country_name_map_cache[abs_dir] = country_name_map
+        return country_name_map
 
     # IPv4-mapped IPv6 地址范围 (::ffff:0.0.0.0/96)
     # Go 的 net.ParseIP().To4() 会把这些地址转回 4 字节 IPv4，
@@ -201,17 +231,7 @@ class MMDBConverter:
         # 确保数据目录存在
         os.makedirs(data_dir, exist_ok=True)
         self._us_state_name_map = self._load_us_state_name_map(data_dir)
-
-    @lru_cache(maxsize=1024)
-    def _normalize_country_name(self, country: str) -> str:
-        """
-        规范化国家/地区名称。
-        将港澳台地区转换为"中国香港"、"中国澳门"、"中国台湾"格式。
-        使用 lru_cache 缓存结果。
-        """
-        if country in self.HMT_REGIONS:
-            return sys.intern(f"中国{country}")
-        return country
+        self._country_name_map = self._load_country_name_map(data_dir)
 
     def _parse_city_record(self, data: dict) -> dict:
         """解析城市数据库记录。内联字典访问，避免 _get_safe_value 开销。"""
@@ -226,7 +246,7 @@ class MMDBConverter:
             if names:
                 continent = names.get("zh-CN") or names.get("en") or ""
 
-        # 国家 - 优先使用中文名，并处理港澳台
+        # 国家 - 优先使用 ISO 配置名，未配置时使用 GeoLite 中文名
         country_d = data.get("country")
         country = ""
         country_iso_code = ""
@@ -235,8 +255,9 @@ class MMDBConverter:
             names = country_d.get("names")
             if names:
                 country = names.get("zh-CN") or names.get("en") or ""
-        if country:
-            country = self._normalize_country_name(country)
+        configured_country = self._country_name_map.get(country_iso_code)
+        if configured_country:
+            country = configured_country
 
         # 部分记录可能没有 country，但包含 registered_country。
         # 仅在 country ISO 缺失时使用它判断是否为美国，避免覆盖实际归属国家。
@@ -287,7 +308,7 @@ class MMDBConverter:
     def _parse_country_record(self, data: dict) -> tuple[str, str]:
         """解析国家数据库记录。返回 (continent, country) 元组。"""
         if not data:
-            return ("", "")
+            return "", ""
 
         # 洲 - 优先使用中文名
         continent_d = data.get("continent")
@@ -297,15 +318,18 @@ class MMDBConverter:
             if names:
                 continent = names.get("zh-CN") or names.get("en") or ""
 
-        # 国家 - 优先使用中文名，并处理港澳台
+        # 国家 - 优先使用 ISO 配置名，未配置时使用 GeoLite 中文名
         country_d = data.get("country")
         country = ""
+        country_iso_code = ""
         if country_d:
+            country_iso_code = country_d.get("iso_code") or ""
             names = country_d.get("names")
             if names:
                 country = names.get("zh-CN") or names.get("en") or ""
-        if country:
-            country = self._normalize_country_name(country)
+        configured_country = self._country_name_map.get(country_iso_code)
+        if configured_country:
+            country = configured_country
 
         return (
             sys.intern(continent) if continent else "",
