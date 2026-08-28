@@ -19,11 +19,11 @@ REGION_RE = re.compile(r"\{region:(.*?), iocount:")
 
 class IPv4XDBOutputTest(unittest.TestCase):
     CASES = (
-        ("1.0.1.1", "中国", None),
-        ("1.178.1.1", "美国", "俄勒冈州"),
-        ("1.36.0.1", "香港(中国)", None),
-        ("27.109.128.1", "澳门(中国)", None),
-        ("78.160.0.1", "土尔其", None),
+        ("1.0.1.1", "中国", None, "CN"),
+        ("1.178.1.1", "美国", "俄勒冈州", "US"),
+        ("1.36.0.1", "香港(中国)", None, "HK"),
+        ("27.109.128.1", "澳门(中国)", None, "MO"),
+        ("78.160.0.1", "土尔其", None, "TR"),
     )
 
     @classmethod
@@ -44,7 +44,7 @@ class IPv4XDBOutputTest(unittest.TestCase):
             )
 
     def test_selected_ip_country_and_state_output(self):
-        command_input = "\n".join(ip for ip, _, _ in self.CASES) + "\nquit\n"
+        command_input = "\n".join(ip for ip, _, _, _ in self.CASES) + "\nquit\n"
         result = subprocess.run(
             [
                 "docker",
@@ -76,12 +76,13 @@ class IPv4XDBOutputTest(unittest.TestCase):
             msg=f"查询结果数量不符:\n{output}",
         )
 
-        for (ip, expected_country, expected_province), region in zip(
+        for (ip, expected_country, expected_province, expected_country_iso), region in zip(
             self.CASES, regions
         ):
             fields = region.split("|")
             with self.subTest(ip=ip, region=region):
-                self.assertGreaterEqual(len(fields), 3)
+                self.assertEqual(8, len(fields))
                 self.assertEqual(expected_country, fields[1])
                 if expected_province is not None:
                     self.assertEqual(expected_province, fields[2])
+                self.assertEqual(expected_country_iso, fields[7])

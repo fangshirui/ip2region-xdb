@@ -49,12 +49,12 @@ class IPRecord:
     使用 __slots__ 减少内存占用，提高访问速度。
     """
     __slots__ = ('start_ip', 'end_ip', 'continent', 'country', 'province',
-                 'city', 'districts', 'isp', 'net', 'priority')
+                 'city', 'districts', 'isp', 'net', 'country_iso', 'priority')
 
     def __init__(self, start_ip: int, end_ip: int, continent: str = "",
                  country: str = "", province: str = "", city: str = "",
                  districts: str = "", isp: str = "", net: str = "",
-                 priority: int = 0):
+                 country_iso: str = "", priority: int = 0):
         self.start_ip = start_ip
         self.end_ip = end_ip
         self.continent = continent
@@ -64,6 +64,7 @@ class IPRecord:
         self.districts = districts
         self.isp = isp
         self.net = net
+        self.country_iso = country_iso
         self.priority = priority
 
     @staticmethod
@@ -81,7 +82,7 @@ class IPRecord:
             start = self._int_to_ipv4_str(self.start_ip)
             end = self._int_to_ipv4_str(self.end_ip)
 
-        return f"{start}|{end}|{self.continent}|{self.country}|{self.province}|{self.city}|{self.districts}|{self.isp}|{self.net}"
+        return f"{start}|{end}|{self.continent}|{self.country}|{self.province}|{self.city}|{self.districts}|{self.isp}|{self.net}|{self.country_iso}"
 
     def same_data(self, other: 'IPRecord') -> bool:
         """检查两条记录的数据是否相同（不含 IP 范围）。"""
@@ -92,7 +93,8 @@ class IPRecord:
             self.city == other.city and
             self.districts == other.districts and
             self.isp == other.isp and
-            self.net == other.net
+            self.net == other.net and
+            self.country_iso == other.country_iso
         )
 
     def merge_with(self, other: 'IPRecord') -> bool:
@@ -236,7 +238,7 @@ class MMDBConverter:
     def _parse_city_record(self, data: dict) -> dict:
         """解析城市数据库记录。内联字典访问，避免 _get_safe_value 开销。"""
         if not data:
-            return {"continent": "", "country": "", "province": "", "city": "", "districts": ""}
+            return {"continent": "", "country": "", "province": "", "city": "", "districts": "", "country_iso": ""}
 
         # 洲 - 优先使用中文名（内联访问嵌套字典）
         continent_d = data.get("continent")
@@ -249,22 +251,24 @@ class MMDBConverter:
         # 国家 - 优先使用 ISO 配置名，未配置时使用 GeoLite 中文名
         country_d = data.get("country")
         country = ""
-        country_iso_code = ""
+        country_iso = ""
         if country_d:
-            country_iso_code = country_d.get("iso_code") or ""
+            country_iso = country_d.get("iso_code") or ""
             names = country_d.get("names")
             if names:
                 country = names.get("zh-CN") or names.get("en") or ""
-        configured_country = self._country_name_map.get(country_iso_code)
+        configured_country = self._country_name_map.get(country_iso)
         if configured_country:
             country = configured_country
 
         # 部分记录可能没有 country，但包含 registered_country。
-        # 仅在 country ISO 缺失时使用它判断是否为美国，避免覆盖实际归属国家。
-        if not country_iso_code:
+        # 仅将 registered_country 用于判断美国州名，不作为输出的国家 ISO，
+        # 避免 ISO 与实际 country 字段不一致。
+        subdivision_country_iso = country_iso
+        if not subdivision_country_iso:
             registered_country = data.get("registered_country")
             if registered_country:
-                country_iso_code = registered_country.get("iso_code") or ""
+                subdivision_country_iso = registered_country.get("iso_code") or ""
 
         # 省份/州 - 来自 subdivisions[0]
         province = ""
@@ -275,7 +279,7 @@ class MMDBConverter:
             names = sub0.get("names") if isinstance(sub0, dict) else None
             if names:
                 # 美国州名先取 GeoLite 英文名，再按配置映射为标准中文名。
-                if country_iso_code == "US":
+                if subdivision_country_iso == "US":
                     english_name = names.get("en") or ""
                     province = self._us_state_name_map.get(
                         english_name, english_name
@@ -302,13 +306,14 @@ class MMDBConverter:
             "country": country,
             "province": sys.intern(province) if province else "",
             "city": sys.intern(city) if city else "",
-            "districts": sys.intern(districts) if districts else ""
+            "districts": sys.intern(districts) if districts else "",
+            "country_iso": sys.intern(country_iso) if country_iso else ""
         }
 
-    def _parse_country_record(self, data: dict) -> tuple[str, str]:
-        """解析国家数据库记录。返回 (continent, country) 元组。"""
+    def _parse_country_record(self, data: dict) -> tuple[str, str, str]:
+        """解析国家数据库记录。返回 (continent, country, country_iso) 元组。"""
         if not data:
-            return "", ""
+            return "", "", ""
 
         # 洲 - 优先使用中文名
         continent_d = data.get("continent")
@@ -333,7 +338,8 @@ class MMDBConverter:
 
         return (
             sys.intern(continent) if continent else "",
-            country
+            country,
+            sys.intern(country_iso_code) if country_iso_code else ""
         )
 
     # ASN 字符串缓存，避免重复创建 "AS{number}" 字符串
@@ -538,7 +544,8 @@ class MMDBConverter:
             return {
                 "continent": self._GEOCN_CONTINENT,
                 "country": self._GEOCN_COUNTRY,
-                "province": "", "city": "", "districts": "", "isp": "", "net": ""
+                "province": "", "city": "", "districts": "", "isp": "", "net": "",
+                "country_iso": "CN"
             }
 
         # 直接访问字典，避免函数调用开销
@@ -557,7 +564,8 @@ class MMDBConverter:
             "city": sys.intern(city) if city else "",
             "districts": sys.intern(districts) if districts else "",
             "isp": sys.intern(str(get("isp", "") or "")),
-            "net": sys.intern(str(get("type", "") or ""))
+            "net": sys.intern(str(get("type", "") or "")),
+            "country_iso": "CN"
         }
 
     @staticmethod
@@ -674,6 +682,7 @@ class MMDBConverter:
                     districts="",
                     isp=isp,
                     net="",
+                    country_iso="",
                     priority=self.PRIORITY_INTERNAL
                 )
                 records.append(record)
@@ -770,6 +779,8 @@ class MMDBConverter:
                         record.city = parsed["city"]
                     if parsed["districts"] and not record.districts:
                         record.districts = parsed["districts"]
+                    if parsed["country_iso"] and not record.country_iso:
+                        record.country_iso = parsed["country_iso"]
 
                 if is_v6:
                     v6_count += 1
@@ -853,7 +864,7 @@ class MMDBConverter:
                     v4_mapped_skipped += 1
                     continue
 
-                continent, country = self._parse_country_record(data)
+                continent, country, country_iso = self._parse_country_record(data)
 
                 key = (start_ip, end_ip)
                 target_dict = ipv6_geolite if is_v6 else ipv4_geolite
@@ -864,6 +875,7 @@ class MMDBConverter:
                         end_ip=end_ip,
                         continent=continent,
                         country=country,
+                        country_iso=country_iso,
                         priority=_PRIO_GEOLITE
                     )
                 else:
@@ -872,6 +884,8 @@ class MMDBConverter:
                         record.continent = continent
                     if country and not record.country:
                         record.country = country
+                    if country_iso and not record.country_iso:
+                        record.country_iso = country_iso
 
                 if is_v6:
                     v6_count += 1
@@ -982,7 +996,8 @@ class MMDBConverter:
         active_by_priority: dict[int, dict[int, IPRecord]] = {}
         top_priority: int | None = None
 
-        # 缓存 top 组合成出的状态 tuple：(continent, country, province, city, districts, isp, net, priority)
+        # 缓存 top 组合成出的状态 tuple：
+        # (continent, country, province, city, districts, isp, net, country_iso, priority)
         top_state: tuple | None = None
         state_dirty = False
 
@@ -1005,7 +1020,7 @@ class MMDBConverter:
             # 在处理当前事件前，输出上一个稳定区间 [last_ip, ip - 1]。
             if last_ip is not None and ip > last_ip and top_priority is not None:
                 if state_dirty:
-                    continent = country = province = city = districts = isp = net = ""
+                    continent = country = province = city = districts = isp = net = country_iso = ""
                     for rec in active_by_priority[top_priority].values():
                         if rec.continent and not continent:
                             continent = rec.continent
@@ -1021,8 +1036,10 @@ class MMDBConverter:
                             isp = rec.isp
                         if rec.net and not net:
                             net = rec.net
+                        if rec.country_iso and not country_iso:
+                            country_iso = rec.country_iso
                     top_state = (continent, country, province, city,
-                                 districts, isp, net, top_priority)
+                                 districts, isp, net, country_iso, top_priority)
                     state_dirty = False
 
                 interval_end = ip - 1
@@ -1041,7 +1058,8 @@ class MMDBConverter:
                             and last_norm.city == top_state[3]
                             and last_norm.districts == top_state[4]
                             and last_norm.isp == top_state[5]
-                            and last_norm.net == top_state[6]):
+                            and last_norm.net == top_state[6]
+                            and last_norm.country_iso == top_state[7]):
                         last_norm.end_ip = interval_end
                     else:
                         normalized_append(IPRecord(last_ip, interval_end, *top_state))
